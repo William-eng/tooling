@@ -1,112 +1,64 @@
-pipeline {
-  agent any
-
-      environment 
-    {
-        PROJECT     = 'tooling-prod'
-        ECRURL      = '059636857273.dkr.ecr.eu-central-1.amazonaws.com'
-        DEPLOY_TO = 'development'
-    }
-
-  stages {
-
-    stage("Initial cleanup") {
-        steps {
-        dir("${WORKSPACE}") {
-            deleteDir()
-        }
-        }
-    }
-
-    stage('Checkout')
-    {
-      steps {
-      checkout([
-        $class: 'GitSCM', 
-        doGenerateSubmoduleConfigurations: false, 
-        extensions: [],
-        submoduleCfg: [], 
-        // branches: [[name: '$branch']],
-        userRemoteConfigs: [[url: "https://github.com/StegTechHub/tooling.git ",credentialsId:'GITHUB_CREDENTIALS']] 	
-        ])
-        
-      }
-        }
-
-          stage('Build preparations')
-        {
-            steps
-            {
-                script 
-                {
-                    // calculate GIT lastest commit short-hash
-                    gitCommitHash = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
-                    shortCommitHash = gitCommitHash.take(7)
-                    // calculate a sample version tag
-                    VERSION = shortCommitHash
-                    // set the build display name
-                    currentBuild.displayName = "#${BUILD_ID}-${VERSION}"
-                    IMAGE = "$PROJECT:$VERSION"
-                }
-            }
-        }
-
-    stage('Build For Dev Environment') {
-               when {
-                expression { BRANCH_NAME ==~ /(dev)/ }
-            }
-        steps {
-            echo 'Build Dockerfile....'
-            script {
-                sh("eval \$(aws ecr get-login --no-include-email --region eu-central-1 | sed 's|https://||')") 
-                // sh "docker build --network=host -t $IMAGE -f deploy/docker/Dockerfile ."
-                sh "docker build --network=host -t $IMAGE ."
-                docker.withRegistry("https://$ECRURL"){
-                docker.image("$IMAGE").push("dev-$BUILD_NUMBER")
-            }
-            }
-        }
-      }
-
-    stage('Build For Staging Environment') {
-               when {
-                expression { BRANCH_NAME ==~ /(staging|master)/ }
-            }
-        steps {
-            echo 'Build Dockerfile....'
-            script {
-                sh("eval \$(aws ecr get-login --no-include-email --region eu-central-1 | sed 's|https://||')")
-                sh "docker build --network=host -t $IMAGE ."
-                docker.withRegistry("https://$ECRURL"){
-                docker.image("$IMAGE").push("staging-$BUILD_NUMBER")
-            }
-            }
-        }
-    }
-
-
-    stage('Build For Production Environment') {
-        when { tag "release-*" }
-        steps {
-            echo 'Build Dockerfile....'
-            script {
-                sh("eval \$(aws ecr get-login --no-include-email --region eu-central-1 | sed 's|https://||')") 
-                // sh "docker build --network=host -t $IMAGE -f deploy/docker/Dockerfile ."
-                sh "docker build --network=host -t $IMAGE ."
-                docker.withRegistry("https://$ECRURL"){
-                docker.image("$IMAGE").push("prod-$BUILD_NUMBER")
-            }
-            }
-        }
-    }
-
-    }
-
-        post
-    {
-        always
-        {
-            sh "docker rmi -f $IMAGE "
-        }
-    }
-} 
+  pipeline {
+                            agent any
+                        
+                            environment {
+                                DOCKER_REGISTRY = "docker.io"
+                                DOCKER_IMAGE = "willywan/toolingapp"
+                            }
+                        
+                            stages {
+                                stage("Initial cleanup") {
+                                    steps {
+                                        dir("${WORKSPACE}") {
+                                            deleteDir()
+                                        }
+                                    }
+                                }
+                        
+                                stage('Checkout') {
+                                    steps {
+                                        checkout scm
+                                    }
+                                }
+                        
+                                stage('Build Docker Image') {
+                                    steps {
+                                        script {
+                                            def branchName = env.BRANCH_NAME
+                                            // Define tagName outside the script block for reuse
+                                            env.TAG_NAME = branchName == 'main' ? 'latest' : "${branchName}-0.0.${env.BUILD_NUMBER}"
+                        
+                                            // Build Docker image
+                                            sh """
+                                            docker build -t ${DOCKER_REGISTRY}/${DOCKER_IMAGE}:${env.TAG_NAME} .
+                                            """
+                                        }
+                                    }
+                                }
+                        
+                                stage('Push Docker Image') {
+                                    steps {
+                                        script {
+                                            // Use Jenkins credentials to login to Docker and push the image
+                                            withCredentials([usernamePassword(credentialsId: 'docker-credentials', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                                                sh """
+                                                echo ${PASSWORD} | docker login -u ${USERNAME} --password-stdin ${DOCKER_REGISTRY}
+                                                docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE}:${env.TAG_NAME}
+                                                """
+                                            }
+                                        }
+                                    }
+                                }
+                        
+                                stage('Cleanup Docker Images') {
+                                    steps {
+                                        script {
+                                            // Clean up Docker images to save space
+                                            sh """
+                                             docker rmi ${DOCKER_REGISTRY}/${DOCKER_IMAGE}:${env.TAG_NAME} || true
+                                            """
+                                        }
+                                    }
+                                }
+                            }
+                        }
